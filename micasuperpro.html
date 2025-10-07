@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Super Mica Bros — 1‑1 (HTML)</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0; height: 100%; background: #5c94fc; overflow: hidden;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    #hud {
+      position: absolute; top: 10px; left: 10px; z-index: 10; color: #fff;
+      text-shadow: 2px 2px 0 #000; font-weight: 700; font-size: 14px;
+      background: rgba(0,0,0,.25); padding: 8px 10px; border-radius: 8px; border: 2px solid #ffd700;
+    }
+    #hint {
+      position: absolute; bottom: 10px; left: 10px; z-index: 10; color: #fff;
+      text-shadow: 2px 2px 0 #000; font-size: 13px; line-height: 1.5;
+      background: rgba(0,0,0,.25); padding: 8px 10px; border-radius: 8px; border: 2px solid #32cd32;
+    }
+    #title {
+      position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+      z-index: 10; color:#ffd700; text-shadow: 2px 2px 0 #000, 0 0 12px #ffd700; font-weight: 900;
+      background: rgba(0,0,0,.35); padding: 6px 12px; border-radius: 10px; border: 2px solid #ffd700;
+    }
+    canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
+  </style>
+</head>
+<body>
+  <div id="title">★ Super Mica Bros — World 1‑1</div>
+  <div id="hud">MICA 000000 • ×3 • ⏱ 400 • ⭐ 0</div>
+  <div id="hint">Flechas o A/D para moverte · W/ESPACIO para saltar · S para agacharte · Shift para correr<br>Golpea bloques (?) desde abajo · Llega al banderín para ganar</div>
+  <canvas id="game" width="800" height="600"></canvas>
+  <script>
+    'use strict';
+
+    // Configuración
+    const CANVAS = document.getElementById('game');
+    const CTX = CANVAS.getContext('2d');
+    const HUD = document.getElementById('hud');
+    const TILE = 32;                  // Tamaño de tile
+    const VIEW_W = CANVAS.width;      // 800
+    const VIEW_H = CANVAS.height;     // 600
+    const GRAVITY = 0.9;              // Física estilo SMB
+    const JUMP_VEL = -14.5;
+    const RUN_ACCEL = 0.7;            // Aceleración al correr
+    const WALK_ACCEL = 0.45;
+    const MAX_WALK = 4.6;
+    const MAX_RUN = 6.9;
+    const FRICTION = 0.82;
+
+    // Estado del jugador / juego
+    const state = {
+      camX: 0,
+      score: 0,
+      coins: 0,
+      lives: 3,
+      time: 400,
+      stars: 0,
+      started: true,
+    };
+
+    // Input
+    const keys = Object.create(null);
+    addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; if ([' ', 'arrowup','arrowdown','arrowleft','arrowright'].includes(e.key.toLowerCase())) e.preventDefault();});
+    addEventListener('keyup',   e => { keys[e.key.toLowerCase()] = false;});
+
+    // Utiles
+    const clamp = (v,min,max)=>v<min?min:(v>max?max:v);
+    const AABB = (a,b)=>!(a.x+a.w<=b.x||a.x>=b.x+b.w||a.y+a.h<=b.y||a.y>=b.y+b.h);
+
+    // Carga de imagen de Mica (opcional)
+    const micaImg = new Image();
+    let micaReady = false;
+    micaImg.onload = ()=> micaReady = true;
+    micaImg.onerror = ()=> micaReady = false;
+    micaImg.src = 'mica.jpeg'; // pon tu foto en la misma carpeta
+
+    // Carga de imágenes para enemigos tipo "foto" (si no existen, se usa fallback)
+    const enemyImageFiles = [
+      'alan.jfif','alan2.jfif','negrogaygmer.jfif','micaboca.jfif','zro.jfif','comecoquitos.jfif','mobreigen.jfif'
+    ];
+    const enemyPhotos = enemyImageFiles.map(fn=>{
+      const img = new Image();
+      const obj = { img, ready:false };
+      img.onload = ()=> obj.ready = true;
+      img.onerror = ()=> obj.ready = false;
+      img.src = fn;
+      return obj;
+    });
+
+    // Tipos de tiles para colisiones y render simplificado
+    // 0: aire, 1: suelo, 2: bloque sólido, 3: bloque ?, 4: brick rompible, 5: tubería, 6: escalera, 7: bandera, 8: poste
+    const T = { AIR:0, GROUND:1, SOLID:2, QBLOCK:3, BRICK:4, PIPE:5, STEP:6, FLAG:7, POLE:8 };
+
+    // Generador simplificado de 1‑1 (layout aproximado sin assets)
+    // Alto 19 tiles (600/32 ≈ 18.75). El suelo está en fila 18.
+    const ROWS = 19;
+    const COLS = 450; // longitud del nivel
+    const map = Array.from({length: ROWS}, ()=>Array.from({length: COLS}, ()=>T.AIR));
+
+    function ground(from,to){ for(let x=from;x<to;x++) map[18][x]=T.GROUND; }
+    function hole(x, w){ for(let xx=0; xx<w; xx++){ if (x+xx>=0 && x+xx<COLS) map[18][x+xx]=T.AIR; } }
+    function pipe(x, heightTiles){ for(let y=0; y<heightTiles; y++){ map[18-y][x]=T.PIPE; map[18-y][x+1]=T.PIPE; } }
+    function steps(x, h){ for(let i=0;i<h;i++) map[18-i][x+i]=T.STEP; }
+    function bricksLine(xFrom,xTo,y){ for(let x=xFrom;x<=xTo;x++) map[y][x]=T.BRICK; }
+    function qblock(x,y){ map[y][x]=T.QBLOCK; }
+    function solid(x,y){ map[y][x]=T.SOLID; }
+    function flagpole(x){ for(let y=10;y<=18;y++) map[y][x]=T.POLE; map[10][x+1]=T.FLAG; }
+
+    function clearMap(){ for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++) map[r][c]=T.AIR; }
+
+    function buildLevel(){
+      clearMap();
+      // Suelo base
+      ground(0, COLS);
+      // Agregar huecos/pozos
+      hole(15,3); hole(60,2); hole(118,4); hole(166,3); hole(210,2);
+
+      // Primera tanda de bloques y caja ?
+      bricksLine(28,28,12); qblock(21,12); qblock(23,12); qblock(25,12); qblock(22,8);
+      // Tubos
+      pipe(38,2); pipe(52,3); pipe(66,4); pipe(82,4);
+      // Obstáculos extra
+      bricksLine(90,94,10); qblock(92,10); qblock(93,10);
+      steps(120,3); steps(124,2); steps(128,1);
+      steps(140,2); steps(144,3);
+      // Bloques/monedas centrales
+      bricksLine(103,103,12); bricksLine(106,110,6);
+      qblock(104,12); qblock(108,12); qblock(109,12);
+      // Escaleras antes del final
+      steps(170,4); steps(174,3); steps(178,2); steps(182,1);
+      // Escaleras después (descenso)
+      steps(188,1); steps(192,2); steps(196,3); steps(200,4);
+      // Extras hacia el final
+      pipe(214,2); pipe(224,3);
+      bricksLine(220,222,12);
+      // Zona final y bandera
+      steps(230,4); steps(234,5); steps(238,6); steps(242,7);
+      flagpole(252);
+    }
+
+  // Entidades dinámicas
+  const entities = [];
+
+    class Entity{ constructor(x,y,w,h){this.x=x;this.y=y;this.w=w;this.h=h;this.vx=0;this.vy=0;this.rem=false;}}
+    class Goomba extends Entity{
+      constructor(x,y){super(x,y,TILE*0.9,TILE*0.9);this.dir=-1;}
+      update(dt){
+        // gravedad
+        this.vy += GRAVITY;
+        // movimiento horizontal simple
+        this.vx = this.dir*1.0;
+        this.x += this.vx; this.resolveHoriz();
+        this.y += this.vy; this.resolveVert();
+      }
+      resolveHoriz(){
+        // girar al chocar con sólido
+        const a = this.getAABB();
+        if (solidAtBox(a)) { this.x -= this.vx; this.dir*=-1; }
+      }
+      resolveVert(){
+        const a = this.getAABB();
+        if (solidAtBox(a)){
+          // subir hasta liberar
+          while(solidAtBox(this.getAABB())){ this.y -= Math.sign(this.vy)||1; if (Math.abs(this.vy)<0.1) break; }
+          this.vy=0;
+        }
+      }
+      getAABB(){ return {x:this.x, y:this.y, w:this.w, h:this.h}; }
+      draw(){ drawGoomba(this.x,this.y,this.w,this.h); }
+    }
+
+    class PhotoEnemy extends Entity{
+      constructor(x,y,photo){ super(x,y,TILE*0.95,TILE*0.95); this.dir = -1; this.photo = photo; }
+      update(dt){ this.vy += GRAVITY; this.vx = this.dir*1.1; this.x += this.vx; this.resolveHoriz(); this.y += this.vy; this.resolveVert(); }
+      resolveHoriz(){ const a=this.getAABB(); if (solidAtBox(a)){ this.x -= this.vx; this.dir *= -1; } }
+      resolveVert(){ const a=this.getAABB(); if (solidAtBox(a)){ while(solidAtBox(this.getAABB())){ this.y -= Math.sign(this.vy)||1; if (Math.abs(this.vy)<0.1) break; } this.vy=0; } }
+      getAABB(){ return {x:this.x,y:this.y,w:this.w,h:this.h}; }
+      draw(){
+        if (this.photo && this.photo.ready){
+          CTX.drawImage(this.photo.img, this.x, this.y, this.w, this.h);
+        } else {
+          drawGoomba(this.x,this.y,this.w,this.h);
+        }
+      }
+    }
+
+    class Player extends Entity{
+      constructor(){super(64, 0, TILE*0.9, TILE*1.1); this.onGround=false; this.facing=1; this.run=false; this.big=false;}
+      update(dt){
+        const accel = (keys['shift']) ? RUN_ACCEL : WALK_ACCEL; this.run = !!keys['shift'];
+        const maxSpeed = this.run ? MAX_RUN : MAX_WALK;
+        let ax = 0;
+        if (keys['arrowleft']||keys['a']) { ax -= accel; this.facing=-1; }
+        if (keys['arrowright']||keys['d']) { ax += accel; this.facing=1; }
+        this.vx = clamp((this.vx + ax), -maxSpeed, maxSpeed);
+        if (!(keys['arrowleft']||keys['a']||keys['arrowright']||keys['d'])) this.vx*=FRICTION;
+
+        // salto
+        const wantJump = keys[' ']||keys['space']||keys['w']||keys['arrowup'];
+        if (wantJump && this.onGround) { this.vy = JUMP_VEL; this.onGround=false; }
+
+        // gravedad
+        this.vy += GRAVITY; if (this.vy > 18) this.vy = 18;
+
+        // movimiento con resolución por ejes
+        this.x += this.vx; this.resolveHoriz();
+        this.y += this.vy; this.resolveVert();
+
+        // cámara sigue al jugador
+        state.camX = clamp(this.x - VIEW_W*0.35, 0, COLS*TILE - VIEW_W);
+
+        // Interacciones con enemigos (Goomba o enemigos con foto)
+        for (const e of entities){
+          if (e instanceof Goomba || e instanceof PhotoEnemy){
+            if (AABB(this.getAABB(), e.getAABB())){
+              // si cae encima
+              if (this.vy>0 && this.y+this.h*0.6 < e.y+e.h*0.5){
+                e.rem = true; this.vy = JUMP_VEL*0.6; state.score += 100;
+              } else {
+                // daño: perder vida simple
+                respawn(); return;
+              }
+            }
+          }
+        }
+      }
+      resolveHoriz(){
+        const a = this.getAABB();
+        if (solidAtBox(a)){
+          this.x -= this.vx;
+          // paso a paso hasta liberar
+          while(!solidAtBox(this.getAABB()) && Math.abs(this.vx)>0.1){ this.x += Math.sign(this.vx)*0.5; if (solidAtBox(this.getAABB())) { this.x -= Math.sign(this.vx)*0.5; break; } }
+          this.vx=0;
+        }
+      }
+      resolveVert(){
+        const a = this.getAABB();
+        if (solidAtBox(a)){
+          // movemos en sentido inverso hasta liberar
+          const sign = Math.sign(this.vy)||1;
+          this.y -= sign;
+          while(solidAtBox(this.getAABB())) this.y -= sign;
+          if (this.vy>0){ // aterriza
+            this.onGround = true;
+          } else { // golpea por abajo
+            this.onGround = false;
+            hitHead(this);
+          }
+          this.vy = 0;
+        } else {
+          if (this.vy>1.2) this.onGround=false;
+        }
+      }
+      getAABB(){ return {x:this.x, y:this.y, w:this.w, h:this.h}; }
+      draw(){ drawMica(this.x, this.y, this.w, this.h, this.facing, this.run, this.onGround); }
+    }
+
+    const player = new Player();
+
+    // Spawnear varios enemigos usando las fotos cargadas
+    function spawnEnemies(){
+      const placements = [
+        [22,17],[34,17],[45,17],[64,17],[76,17],[88,17],
+        [104,17],[112,17],[126,17],[138,17],[152,17],[165,17],
+        [176,17],[186,17],[198,17],[205,17],[216,17],[226,17],
+      ];
+      let i=0;
+      for (const [tx,ty] of placements){
+        const px = tx*TILE, py = ty*TILE;
+        const photo = enemyPhotos[i % enemyPhotos.length]; i++;
+        entities.push(new PhotoEnemy(px, py, photo));
+      }
+    }
+
+    // Colisiones con tiles
+    function tileAtPixel(px, py){
+      const tx = Math.floor(px / TILE), ty = Math.floor(py / TILE);
+      if (ty<0||tx<0||tx>=COLS) return T.SOLID; // límites laterales y techo bloquean
+      if (ty>=ROWS) return T.AIR; // bajo del mundo: aire (para caer a pozos)
+      return map[ty][tx];
+    }
+    function isSolid(t){ return t===T.GROUND||t===T.SOLID||t===T.BRICK||t===T.PIPE||t===T.STEP||t===T.POLE; }
+    function solidAtBox(box){
+      const x0 = Math.floor(box.x/TILE), x1=Math.floor((box.x+box.w-1)/TILE);
+      const y0 = Math.floor(box.y/TILE), y1=Math.floor((box.y+box.h-1)/TILE);
+      for(let ty=y0; ty<=y1; ty++){
+        for(let tx=x0; tx<=x1; tx++){
+          if (tx<0||tx>=COLS) return true; // paredes laterales
+          if (ty<0) return true;           // techo
+          if (ty>=ROWS) continue;          // debajo: aire
+          if (isSolid(map[ty][tx])) return true;
+        }
+      }
+      return false;
+    }
+
+    // Golpe a bloque desde abajo
+    function hitHead(p){
+      const headX = Math.floor((p.x + p.w*0.5)/TILE), headY = Math.floor(p.y/TILE);
+      if (headY>=0 && headY<ROWS && headX>=0 && headX<COLS){
+        const t = map[headY][headX];
+        if (t===T.QBLOCK){
+          map[headY][headX] = T.SOLID; // bloque gastado
+          state.coins++; state.score += 200;
+          spawnPopup(headX*TILE+TILE/2, headY*TILE-6, '+200');
+        } else if (t===T.BRICK){
+          // romper si es chica animación, aquí lo convertimos en aire
+          map[headY][headX] = T.AIR;
+          state.score += 50; spawnPopup(headX*TILE+TILE/2, headY*TILE, 'brick');
+        }
+      }
+    }
+
+    // Respawn simple
+    function respawn(){
+      state.lives--;
+      if (state.lives <= 0){ gameOver(); return; }
+      // Reiniciar nivel manteniendo puntaje/monedas pero con una vida menos
+      resetLevel(false);
+      spawnPopup(player.x, player.y-20, 'OUCH');
+    }
+    function gameOver(){
+      state.time=0; state.started=false;
+      spawnPopup(state.camX+VIEW_W/2, VIEW_H/2, 'GAME OVER');
+      // Reinicio automático tras perder todas las vidas
+      setTimeout(()=>{ resetLevel(true); }, 2200);
+    }
+
+    // UI flotante
+    const popups=[];
+    function spawnPopup(x,y,text){ popups.push({x,y,text,t:0}); }
+
+    // Dibujo
+    function drawBackground(){
+      // Cielo y nubes (sin dibujar suelo completo para soportar huecos)
+      CTX.fillStyle = '#5c94fc'; CTX.fillRect(0,0,VIEW_W,VIEW_H);
+      CTX.fillStyle = 'rgba(255,255,255,.9)';
+      const cx = - (state.camX*0.3)%VIEW_W; // parallax
+      CTX.beginPath(); CTX.arc(cx+100,120,22,0,Math.PI*2); CTX.arc(cx+120,110,18,0,Math.PI*2); CTX.arc(cx+140,122,20,0,Math.PI*2); CTX.fill();
+      CTX.beginPath(); CTX.arc(cx+360,90,18,0,Math.PI*2); CTX.arc(cx+380,80,14,0,Math.PI*2); CTX.arc(cx+400,92,16,0,Math.PI*2); CTX.fill();
+    }
+
+    function drawTiles(){
+      const startCol = Math.floor(state.camX/TILE)-2; const endCol = Math.ceil((state.camX+VIEW_W)/TILE)+2;
+      for (let ty=0; ty<ROWS; ty++){
+        for(let tx=Math.max(0,startCol); tx<Math.min(COLS,endCol); tx++){
+          const t = map[ty][tx]; if (t===T.AIR) continue;
+          const x = tx*TILE - state.camX, y = ty*TILE;
+          switch(t){
+            case T.GROUND:
+              drawGroundTile(x,y); break;
+            case T.SOLID:
+              drawBlock(x,y,'#d2b48c','#8b7d6b'); break;
+            case T.QBLOCK:
+              drawQBlock(x,y); break;
+            case T.BRICK:
+              drawBrick(x,y); break;
+            case T.PIPE:
+              drawPipe(x,y); break;
+            case T.STEP:
+              drawStep(x,y); break;
+            case T.POLE:
+              drawPole(x,y); break;
+            case T.FLAG:
+              drawFlag(x,y); break;
+          }
+        }
+      }
+    }
+
+    function drawGroundTile(x,y){
+      // tierra con césped arriba
+      CTX.fillStyle = '#8b4513'; CTX.fillRect(x,y,TILE,TILE);
+      CTX.fillStyle = '#228b22'; CTX.fillRect(x,y, TILE, 6);
+    }
+    function drawBlock(x,y,fill,stroke){ CTX.fillStyle=fill; CTX.fillRect(x,y,TILE,TILE); CTX.strokeStyle=stroke; CTX.lineWidth=2; CTX.strokeRect(x+1,y+1,TILE-2,TILE-2); }
+    function drawQBlock(x,y){ drawBlock(x,y,'#f7b733','#b87333'); CTX.fillStyle='#8b0000'; CTX.font='bold 18px monospace'; CTX.fillText('?', x+11, y+22); }
+    function drawBrick(x,y){ drawBlock(x,y,'#b5651d','#5a2d0c'); CTX.strokeStyle='#5a2d0c'; CTX.beginPath(); CTX.moveTo(x,y+16); CTX.lineTo(x+TILE,y+16); CTX.moveTo(x+8,y); CTX.lineTo(x+8,y+16); CTX.moveTo(x+24,y+16); CTX.lineTo(x+24,y+32); CTX.stroke(); }
+    function drawPipe(x,y){ CTX.fillStyle='#2e8b57'; CTX.fillRect(x,y,TILE,TILE); CTX.fillStyle='#3cb371'; CTX.fillRect(x,y, TILE, 6); }
+    function drawStep(x,y){ drawBlock(x,y,'#c2b280','#7a6a4f'); }
+    function drawPole(x,y){ CTX.fillStyle='#ffffff'; CTX.fillRect(x+TILE/2-2,y,4,TILE); }
+    function drawFlag(x,y){ CTX.fillStyle='#ff6b35'; CTX.fillRect(x,y+4,18,10); CTX.fillStyle='#ffd700'; CTX.fillRect(x+18,y+4,6,10); }
+
+    function drawGoomba(x,y,w,h){ CTX.fillStyle='#8b4513'; CTX.beginPath(); CTX.ellipse(x+w/2,y+h*0.65,w*0.45,h*0.35,0,0,Math.PI*2); CTX.fill(); CTX.fillStyle='#000'; CTX.fillRect(x+w*0.35,y+h*0.72,w*0.12,h*0.1); CTX.fillRect(x+w*0.53,y+h*0.72,w*0.12,h*0.1); }
+
+    function drawMica(x,y,w,h,face,run,onGround){
+      if (micaReady){
+        // Dibujar la foto con borde
+        CTX.save();
+        CTX.translate(x + w/2, y + h/2);
+        CTX.scale(face<0?-1:1,1);
+        CTX.drawImage(micaImg, -w/2, -h, w, h*1.2);
+        CTX.restore();
+      } else {
+        // Placeholder simple
+        CTX.fillStyle = '#ff69b4'; CTX.fillRect(x,y,w,h);
+        CTX.fillStyle = '#000'; CTX.fillRect(x+w*0.2,y+6, w*0.6, 6);
+      }
+    }
+
+    // HUD
+    function refreshHUD(){
+      HUD.textContent = `MICA ${String(state.score).padStart(6,'0')} • ×${state.lives} • ⏱ ${state.time} • ⭐ ${state.stars}`;
+    }
+
+    // Loop principal
+    let last = performance.now();
+    let timeAccumulator = 0, secTimer = 0;
+    function loop(now){
+      const dt = (now - last)/16.6667; last = now; timeAccumulator += dt; secTimer += (now - last);
+      update(dt);
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    function update(dt){
+      if (!state.started) return;
+      player.update(dt);
+      for (const e of entities) e.update(dt);
+      // limpiar muertos
+      for (let i=entities.length-1; i>=0; i--) if (entities[i].rem) entities.splice(i,1);
+      // caer a un pozo
+      if (player.y > VIEW_H + 80) { respawn(); return; }
+      // Temporizador (aprox.) cada ~1s
+      timerUpdate();
+      refreshHUD();
+      // Ganar si toca bandera
+      if (reachedFlag()) win();
+    }
+
+    let clockMs = 0;
+    function timerUpdate(){
+      // aproximar 60 fps → reducir 1 segundo cada 60 frames
+      clockMs++;
+      if (clockMs>=60){
+        clockMs=0; if (state.time>0) state.time--; else gameOver();
+      }
+    }
+
+    function reachedFlag(){
+      const a = player.getAABB();
+      const flagBox = { x: 252*TILE - state.camX, y: 10*TILE, w: 2*TILE, h: 9*TILE };
+      // usar mundo real (no offset cámara) para colisión
+      const worldFlag = { x: 252*TILE, y: 10*TILE, w: 2*TILE, h: 9*TILE };
+      const worldPlayer = { x: player.x, y: player.y, w: player.w, h: player.h };
+      return AABB(worldPlayer, worldFlag);
+    }
+    function win(){
+      if (!state.started) return; state.started=false; state.score += 2000;
+      spawnPopup(state.camX+VIEW_W/2, 180, 'COURSE CLEAR!');
+      // Reinicio automático del nivel tras ganar
+      setTimeout(()=>{ resetLevel(false); }, 2200);
+    }
+
+    function draw(){
+      CTX.save();
+      drawBackground();
+      drawTiles();
+      // Dibujar entidades dentro del viewport
+      CTX.translate(-state.camX,0);
+      for (const e of entities) e.draw();
+      player.draw();
+      CTX.restore();
+      // popups
+      for (let i=popups.length-1;i>=0;i--){
+        const p = popups[i]; p.t+=1; p.y -= 0.5; CTX.fillStyle = '#ffd700'; CTX.strokeStyle='#000'; CTX.lineWidth=3; CTX.font='bold 20px monospace';
+        CTX.strokeText(p.text, p.x - state.camX, p.y); CTX.fillText(p.text, p.x - state.camX, p.y);
+        if (p.t>120) popups.splice(i,1);
+      }
+    }
+
+    function resetLevel(fullReset){
+      // fullReset: restablece vidas y puntaje
+      if (fullReset){ state.lives = 3; state.score = 0; state.coins=0; state.stars=0; }
+      state.time = 400; state.camX = 0; state.started = true;
+      player.x = 64; player.y = 0; player.vx=0; player.vy=0; player.onGround=false;
+      entities.length = 0; popups.length = 0;
+      buildLevel();
+      spawnEnemies();
+      refreshHUD();
+    }
+
+    // Iniciar
+    buildLevel();
+    resetLevel(true);
+    requestAnimationFrame(loop);
+
+  </script>
+  <!--
+    Notas:
+    - Coloca "mica.jpeg" junto a este HTML para ver a Mica como protagonista.
+    - Este nivel 1‑1 es aproximado en coordenadas pero respeta estructuras clave: bloques ?, tubos, escaleras y bandera.
+    - Si quieres usar sprites del proyecto Python, podemos re-dibujar usando sus imágenes (requiere servir por http por restricciones de CORS y rutas).
+  -->
+</body>
+</html>
